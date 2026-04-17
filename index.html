@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CubeWarzzz</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; }
+  </style>
+</head>
+<body>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <script>
+    const COLS = 7;
+    const ROWS = 7;
+    const CELL = 80;
+    const GAP  = 4;
+    const CENTER_COL = 3;
+
+    const C_DEFAULT   = 0x3a3a5c;
+    const C_FORBIDDEN = 0x1e1e30;
+    const C_RED       = 0xcc2222;
+    const C_GREEN     = 0x22cc55;
+    const C_P1        = 0x2277ff;
+    const C_P2        = 0xff8800;
+    const C_CLAIMABLE = 0x88aaff; // highlight for claimable squares during claiming phase
+    const C_BORDER    = 0x111122;
+
+    // Player hover colours (used only during claiming phase)
+    const C_HOVER_P = [null, 0x4499ff, 0xffaa44];
+
+    const STATE = { HOME: 'home', COIN: 'coin', CLAIMING: 'claiming' };
+
+    function isCentreCol(col) { return col === CENTER_COL; }
+    function isRedSquare(row, col)   { return col === CENTER_COL && row > 0 && row < ROWS - 1; }
+    function isGreenSquare(row, col) { return col === CENTER_COL && (row === 0 || row === ROWS - 1); }
+
+    // Forbidden for initial home selection only
+    function isForbiddenHome(row, col) {
+      if (col === CENTER_COL) return true;
+      if (row === 0        && (col === CENTER_COL - 1 || col === CENTER_COL + 1)) return true;
+      if (row === ROWS - 1 && (col === CENTER_COL - 1 || col === CENTER_COL + 1)) return true;
+      return false;
+    }
+
+    class BoardScene extends Phaser.Scene {
+      constructor() { super('BoardScene'); }
+
+      create() {
+        this.state = STATE.HOME;
+        this.currentPlayer = 1;
+        this.homesChosen = 0;
+
+        const totalW = COLS * CELL + (COLS - 1) * GAP;
+        const totalH = ROWS * CELL + (ROWS - 1) * GAP;
+        this.boardOffsetX = (this.scale.width  - totalW) / 2;
+        this.boardOffsetY = (this.scale.height - totalH) / 2 + 10;
+
+        // Build grid
+        this.grid = [];   // grid[row][col] = rect
+        this.cells = [];  // flat list
+        for (let row = 0; row < ROWS; row++) {
+          this.grid[row] = [];
+          for (let col = 0; col < COLS; col++) {
+            const x = this.boardOffsetX + col * (CELL + GAP) + CELL / 2;
+            const y = this.boardOffsetY + row * (CELL + GAP) + CELL / 2;
+
+            let baseFill;
+            if (isGreenSquare(row, col))      baseFill = C_GREEN;
+            else if (isRedSquare(row, col))   baseFill = C_RED;
+            else if (isForbiddenHome(row, col)) baseFill = C_FORBIDDEN;
+            else                               baseFill = C_DEFAULT;
+
+            const rect = this.add.rectangle(x, y, CELL, CELL, baseFill);
+            rect.setStrokeStyle(2, C_BORDER);
+            rect.baseFill = baseFill;
+            rect.row  = row;
+            rect.col  = col;
+            rect.owner = 0;
+
+            rect.setInteractive({ cursor: 'default' });
+            rect.on('pointerover', () => this.onHover(rect, true));
+            rect.on('pointerout',  () => this.onHover(rect, false));
+            rect.on('pointerdown', () => this.onCellClick(rect));
+
+            this.grid[row][col] = rect;
+            this.cells.push(rect);
+          }
+        }
+
+        // Title
+        this.add.text(this.scale.width / 2, 12, 'CubeWarzzz', {
+          fontSize: '26px', fontFamily: 'Arial Black, sans-serif',
+          color: '#e0e0ff', stroke: '#000033', strokeThickness: 4,
+        }).setOrigin(0.5, 0);
+
+        // Player labels
+        this.p1Label = this.add.text(30, this.scale.height - 70, 'PLAYER 1', {
+          fontSize: '16px', fontFamily: 'Arial Black, sans-serif',
+          color: '#4499ff', stroke: '#000033', strokeThickness: 3,
+        }).setOrigin(0, 0.5);
+
+        this.p2Label = this.add.text(this.scale.width - 30, this.scale.height - 70, 'PLAYER 2', {
+          fontSize: '16px', fontFamily: 'Arial Black, sans-serif',
+          color: '#ffaa33', stroke: '#330000', strokeThickness: 3,
+        }).setOrigin(1, 0.5);
+
+        // Coin flip button (hidden until needed)
+        this.coinBtn = this.add.text(this.scale.width / 2, this.scale.height - 30, '[ FLIP COIN ]', {
+          fontSize: '20px', fontFamily: 'Arial Black, sans-serif',
+          color: '#ffff55', stroke: '#333300', strokeThickness: 3,
+          backgroundColor: '#333300', padding: { x: 14, y: 6 },
+        }).setOrigin(0.5, 0.5).setInteractive({ cursor: 'pointer' }).setVisible(false);
+        this.coinBtn.on('pointerdown', () => this.flipCoin());
+        this.coinBtn.on('pointerover', () => this.coinBtn.setColor('#ffffff'));
+        this.coinBtn.on('pointerout',  () => this.coinBtn.setColor('#ffff55'));
+
+        // Status text (above button)
+        this.statusText = this.add.text(this.scale.width / 2, this.scale.height - 70, '', {
+          fontSize: '18px', fontFamily: 'Arial, sans-serif',
+          color: '#ffffff', stroke: '#000000', strokeThickness: 3,
+        }).setOrigin(0.5, 0.5);
+
+        this.updateUI();
+      }
+
+      // ── Pointer events ──────────────────────────────────────────────────────
+
+      onHover(rect, entering) {
+        if (this.state === STATE.HOME) {
+          if (isForbiddenHome(rect.row, rect.col)) return;
+          if (rect.owner !== 0) return;
+          // Only highlight if it's the current player's home turn
+          const p = this.currentPlayer;
+          if (p === 1 && this.homesChosen === 0) {
+            rect.setFillStyle(entering ? C_HOVER_P[1] : rect.baseFill);
+          } else if (p === 2 && this.homesChosen === 1) {
+            rect.setFillStyle(entering ? C_HOVER_P[2] : rect.baseFill);
+          }
+        } else if (this.state === STATE.CLAIMING) {
+          if (!rect.claimable) return;
+          rect.setFillStyle(entering ? C_HOVER_P[this.currentPlayer] : C_CLAIMABLE);
+        }
+      }
+
+      onCellClick(rect) {
+        if (this.state === STATE.HOME) {
+          this.handleHomeClick(rect);
+        } else if (this.state === STATE.CLAIMING) {
+          this.handleClaimClick(rect);
+        }
+      }
+
+      // ── Home selection ───────────────────────────────────────────────────────
+
+      handleHomeClick(rect) {
+        if (isForbiddenHome(rect.row, rect.col)) return;
+        if (rect.owner !== 0) return;
+
+        const p = this.currentPlayer;
+        if (p === 1 && this.homesChosen !== 0) return;
+        if (p === 2 && this.homesChosen !== 1) return;
+
+        this.claimRect(rect, p);
+        this.homesChosen++;
+
+        if (this.homesChosen === 1) {
+          this.currentPlayer = 2;
+          this.updateUI();
+        } else {
+          // Both homes chosen — start gameplay with P1
+          this.currentPlayer = 1;
+          this.state = STATE.COIN;
+          this.updateUI();
+        }
+      }
+
+      // ── Coin flip ────────────────────────────────────────────────────────────
+
+      flipCoin() {
+        const heads = Math.random() < 0.5;
+        const p = this.currentPlayer;
+
+        if (heads) {
+          const claimable = this.getClaimableSquares(p);
+          if (claimable.length === 0) {
+            // Heads but nowhere to expand — skip
+            this.showCoinResult('HEADS — but no squares to claim! Turn skipped.', p);
+            this.time.delayedCall(1800, () => this.endTurn());
+          } else {
+            this.showCoinResult('HEADS — pick a square to claim!', p);
+            this.state = STATE.CLAIMING;
+            this.highlightClaimable(claimable);
+            this.coinBtn.setVisible(false);
+          }
+        } else {
+          this.showCoinResult('TAILS — turn ends.', p);
+          this.time.delayedCall(1500, () => this.endTurn());
+        }
+      }
+
+      showCoinResult(msg, p) {
+        this.statusText.setText(msg);
+        this.statusText.setColor(p === 1 ? '#4499ff' : '#ffaa33');
+        this.coinBtn.setVisible(false);
+      }
+
+      // ── Claiming ─────────────────────────────────────────────────────────────
+
+      getClaimableSquares(p) {
+        const owned = this.cells.filter(c => c.owner === p);
+        const candidates = new Set();
+        for (const cell of owned) {
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              if (dr === 0 && dc === 0) continue;
+              const r = cell.row + dr, c = cell.col + dc;
+              if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+              const neighbour = this.grid[r][c];
+              if (neighbour.owner !== 0) continue;
+              if (isRedSquare(r, c) || isGreenSquare(r, c)) continue;
+              candidates.add(neighbour);
+            }
+          }
+        }
+        return [...candidates];
+      }
+
+      highlightClaimable(claimable) {
+        for (const cell of claimable) {
+          cell.claimable = true;
+          cell.setFillStyle(C_CLAIMABLE);
+        }
+      }
+
+      clearClaimableHighlights() {
+        for (const cell of this.cells) {
+          if (cell.claimable) {
+            cell.claimable = false;
+            cell.setFillStyle(cell.owner === 0 ? cell.baseFill : (cell.owner === 1 ? C_P1 : C_P2));
+          }
+        }
+      }
+
+      handleClaimClick(rect) {
+        if (!rect.claimable) return;
+        this.clearClaimableHighlights();
+        this.claimRect(rect, this.currentPlayer);
+        this.endTurn();
+      }
+
+      // ── Helpers ──────────────────────────────────────────────────────────────
+
+      claimRect(rect, player) {
+        rect.owner = player;
+        rect.setFillStyle(player === 1 ? C_P1 : C_P2);
+        rect.baseFill = player === 1 ? C_P1 : C_P2;
+      }
+
+      endTurn() {
+        this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
+        this.state = STATE.COIN;
+        this.updateUI();
+      }
+
+      // ── UI ───────────────────────────────────────────────────────────────────
+
+      updateUI() {
+        const p = this.currentPlayer;
+        const pColor = p === 1 ? '#4499ff' : '#ffaa33';
+
+        this.p1Label.setAlpha(p === 1 ? 1 : 0.35);
+        this.p2Label.setAlpha(p === 2 ? 1 : 0.35);
+
+        if (this.state === STATE.HOME) {
+          this.coinBtn.setVisible(false);
+          const msg = p === 1
+            ? 'Player 1 — choose your home square'
+            : 'Player 2 — choose your home square';
+          this.statusText.setText(msg).setColor(pColor);
+        } else if (this.state === STATE.COIN) {
+          this.coinBtn.setVisible(true);
+          this.statusText.setText(`Player ${p}'s turn`).setColor(pColor);
+        }
+        // CLAIMING state: statusText already set by flipCoin()
+      }
+    }
+
+    const config = {
+      type: Phaser.AUTO,
+      width: 800,
+      height: 720,
+      backgroundColor: '#1a1a2e',
+      scene: BoardScene,
+      parent: document.body,
+    };
+
+    new Phaser.Game(config);
+  </script>
+</body>
+</html>
