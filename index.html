@@ -309,9 +309,8 @@
             return;
           }
 
-          this.statusText.setText(`Player ${p} captured a square — another turn! (${oddsLabel})`).setColor(pColor);
-
           if (isOpponentSquare) {
+            this.statusText.setText(`Player ${p} captured a square — another turn! (${oddsLabel})`).setColor(pColor);
             this.time.delayedCall(900, () => {
               this.locked = false;
               this.state = STATE.CLAIMING;
@@ -320,6 +319,8 @@
             });
             return;
           }
+
+          this.statusText.setText(`Player ${p} claimed the square! (${oddsLabel})`).setColor(pColor);
         } else {
           this.statusText.setText(`Player ${p} failed to claim. (${oddsLabel})`).setColor('#aaaaaa');
         }
