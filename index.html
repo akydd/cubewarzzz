@@ -17,25 +17,31 @@
     const GAP  = 4;
     const CENTER_COL = 3;
 
-    const C_DEFAULT   = 0x3a3a5c;
-    const C_FORBIDDEN = 0x1e1e30;
-    const C_RED       = 0xcc2222;
-    const C_GREEN     = 0x22cc55;
-    const C_P1        = 0x2277ff;
-    const C_P2        = 0xff8800;
-    const C_CLAIMABLE = 0x88aaff; // highlight for claimable squares during claiming phase
-    const C_BORDER    = 0x111122;
+    const C_DEFAULT    = 0x3a3a5c;
+    const C_FORBIDDEN  = 0x1e1e30;
+    const C_RED        = 0xcc2222;
+    const C_GREEN      = 0x22cc55;
+    const C_P1         = 0x2277ff;
+    const C_P2         = 0xff8800;
+    const C_BORDER     = 0x111122;
+    // Target highlights
+    const C_TARGET_FREE = 0x66bbff;  // unclaimed neighbour (2/3 odds)
+    const C_TARGET_OPP  = 0xff5577;  // opponent's neighbour (4/9 odds)
+    const C_TARGET_HOME = 0xcc44ff;  // opponent's home square (13% odds)
+    const C_RELOCATE    = 0xffdd00;  // own home square — click to start relocation
+    const C_NEWHOME     = 0xffee88;  // eligible new home squares during relocation
+    // Hover tints
+    const C_HOVER_P = [null, 0x55aaff, 0xffbb55];
 
-    // Player hover colours (used only during claiming phase)
-    const C_HOVER_P = [null, 0x4499ff, 0xffaa44];
+    const ODDS_FREE = 2 / 3;
+    const ODDS_OPP  = 4 / 9;
+    const ODDS_HOME = 0.13;
 
-    const STATE = { HOME: 'home', COIN: 'coin', CLAIMING: 'claiming' };
+    const STATE = { HOME: 'home', CLAIMING: 'claiming', CHANGING_HOME: 'changing_home' };
 
-    function isCentreCol(col) { return col === CENTER_COL; }
     function isRedSquare(row, col)   { return col === CENTER_COL && row > 0 && row < ROWS - 1; }
     function isGreenSquare(row, col) { return col === CENTER_COL && (row === 0 || row === ROWS - 1); }
 
-    // Forbidden for initial home selection only
     function isForbiddenHome(row, col) {
       if (col === CENTER_COL) return true;
       if (row === 0        && (col === CENTER_COL - 1 || col === CENTER_COL + 1)) return true;
@@ -50,15 +56,19 @@
         this.state = STATE.HOME;
         this.currentPlayer = 1;
         this.homesChosen = 0;
+        this.locked = false;
+        this.homeLabels = {}; // player -> Text object
+        this.homeRects  = {}; // player -> rect
+        this.firstTurn  = { 1: true, 2: true };
 
         const totalW = COLS * CELL + (COLS - 1) * GAP;
         const totalH = ROWS * CELL + (ROWS - 1) * GAP;
         this.boardOffsetX = (this.scale.width  - totalW) / 2;
         this.boardOffsetY = (this.scale.height - totalH) / 2 + 10;
 
-        // Build grid
-        this.grid = [];   // grid[row][col] = rect
-        this.cells = [];  // flat list
+        this.grid  = [];
+        this.cells = [];
+
         for (let row = 0; row < ROWS; row++) {
           this.grid[row] = [];
           for (let col = 0; col < COLS; col++) {
@@ -66,10 +76,10 @@
             const y = this.boardOffsetY + row * (CELL + GAP) + CELL / 2;
 
             let baseFill;
-            if (isGreenSquare(row, col))      baseFill = C_GREEN;
-            else if (isRedSquare(row, col))   baseFill = C_RED;
-            else if (isForbiddenHome(row, col)) baseFill = C_FORBIDDEN;
-            else                               baseFill = C_DEFAULT;
+            if (isGreenSquare(row, col))        baseFill = C_GREEN;
+            else if (isRedSquare(row, col))      baseFill = C_RED;
+            else if (isForbiddenHome(row, col))  baseFill = C_FORBIDDEN;
+            else                                 baseFill = C_DEFAULT;
 
             const rect = this.add.rectangle(x, y, CELL, CELL, baseFill);
             rect.setStrokeStyle(2, C_BORDER);
@@ -77,6 +87,7 @@
             rect.row  = row;
             rect.col  = col;
             rect.owner = 0;
+            rect.targetType = null; // 'free' | 'opp' | null
 
             rect.setInteractive({ cursor: 'default' });
             rect.on('pointerover', () => this.onHover(rect, true));
@@ -94,32 +105,44 @@
           color: '#e0e0ff', stroke: '#000033', strokeThickness: 4,
         }).setOrigin(0.5, 0);
 
+        // Legend
+        this.add.text(this.scale.width / 2, this.scale.height - 18,
+          '■ unclaimed (2/3)   ■ opponent (4/9)   ■ opp. home (13%)', {
+          fontSize: '13px', fontFamily: 'Arial, sans-serif', color: '#aaaacc',
+        }).setOrigin(0.5, 1);
+
+        const ly = this.scale.height - 11;
+        this.add.rectangle(this.scale.width / 2 - 121, ly, 11, 11, C_TARGET_FREE);
+        this.add.rectangle(this.scale.width / 2 +  13, ly, 11, 11, C_TARGET_OPP);
+        this.add.rectangle(this.scale.width / 2 + 142, ly, 11, 11, C_TARGET_HOME);
+
         // Player labels
-        this.p1Label = this.add.text(30, this.scale.height - 70, 'PLAYER 1', {
+        this.p1Label = this.add.text(30, this.scale.height - 50, 'PLAYER 1', {
           fontSize: '16px', fontFamily: 'Arial Black, sans-serif',
           color: '#4499ff', stroke: '#000033', strokeThickness: 3,
         }).setOrigin(0, 0.5);
 
-        this.p2Label = this.add.text(this.scale.width - 30, this.scale.height - 70, 'PLAYER 2', {
+        this.p2Label = this.add.text(this.scale.width - 30, this.scale.height - 50, 'PLAYER 2', {
           fontSize: '16px', fontFamily: 'Arial Black, sans-serif',
           color: '#ffaa33', stroke: '#330000', strokeThickness: 3,
         }).setOrigin(1, 0.5);
 
-        // Coin flip button (hidden until needed)
-        this.coinBtn = this.add.text(this.scale.width / 2, this.scale.height - 30, '[ FLIP COIN ]', {
-          fontSize: '20px', fontFamily: 'Arial Black, sans-serif',
-          color: '#ffff55', stroke: '#333300', strokeThickness: 3,
-          backgroundColor: '#333300', padding: { x: 14, y: 6 },
-        }).setOrigin(0.5, 0.5).setInteractive({ cursor: 'pointer' }).setVisible(false);
-        this.coinBtn.on('pointerdown', () => this.flipCoin());
-        this.coinBtn.on('pointerover', () => this.coinBtn.setColor('#ffffff'));
-        this.coinBtn.on('pointerout',  () => this.coinBtn.setColor('#ffff55'));
-
-        // Status text (above button)
-        this.statusText = this.add.text(this.scale.width / 2, this.scale.height - 70, '', {
+        // Status text
+        this.statusText = this.add.text(this.scale.width / 2, this.scale.height - 50, '', {
           fontSize: '18px', fontFamily: 'Arial, sans-serif',
           color: '#ffffff', stroke: '#000000', strokeThickness: 3,
         }).setOrigin(0.5, 0.5);
+
+        // Restart button — shown only after a win
+        this.restartBtn = this.add.text(this.scale.width / 2, this.scale.height / 2, '[ PLAY AGAIN ]', {
+          fontSize: '28px', fontFamily: 'Arial Black, sans-serif',
+          color: '#ffffff', stroke: '#000033', strokeThickness: 4,
+          backgroundColor: '#223388', padding: { x: 20, y: 10 },
+        }).setOrigin(0.5, 0.5).setDepth(20).setVisible(false)
+          .setInteractive({ cursor: 'pointer' });
+        this.restartBtn.on('pointerover', () => this.restartBtn.setBackgroundColor('#3344bb'));
+        this.restartBtn.on('pointerout',  () => this.restartBtn.setBackgroundColor('#223388'));
+        this.restartBtn.on('pointerdown', () => this.scene.restart());
 
         this.updateUI();
       }
@@ -127,139 +150,255 @@
       // ── Pointer events ──────────────────────────────────────────────────────
 
       onHover(rect, entering) {
+        if (this.locked) return;
+
         if (this.state === STATE.HOME) {
-          if (isForbiddenHome(rect.row, rect.col)) return;
-          if (rect.owner !== 0) return;
-          // Only highlight if it's the current player's home turn
+          if (isForbiddenHome(rect.row, rect.col) || rect.owner !== 0) return;
           const p = this.currentPlayer;
-          if (p === 1 && this.homesChosen === 0) {
-            rect.setFillStyle(entering ? C_HOVER_P[1] : rect.baseFill);
-          } else if (p === 2 && this.homesChosen === 1) {
-            rect.setFillStyle(entering ? C_HOVER_P[2] : rect.baseFill);
+          if ((p === 1 && this.homesChosen === 0) || (p === 2 && this.homesChosen === 1)) {
+            rect.setFillStyle(entering ? C_HOVER_P[p] : rect.baseFill);
           }
-        } else if (this.state === STATE.CLAIMING) {
-          if (!rect.claimable) return;
-          rect.setFillStyle(entering ? C_HOVER_P[this.currentPlayer] : C_CLAIMABLE);
+          return;
+        }
+
+        if ((this.state === STATE.CLAIMING || this.state === STATE.CHANGING_HOME) && rect.targetType) {
+          if (rect.targetType === 'free' || rect.targetType === 'opp' || rect.targetType === 'home') {
+            const strokeColor = rect.targetType === 'free' ? C_TARGET_FREE
+                              : rect.targetType === 'opp'  ? C_TARGET_OPP
+                              :                              C_TARGET_HOME;
+            rect.setFillStyle(entering ? C_HOVER_P[this.currentPlayer] : rect.baseFill);
+            if (!entering) rect.setStrokeStyle(3, strokeColor);
+          } else {
+            const highlight = rect.targetType === 'relocate' ? C_RELOCATE : C_NEWHOME;
+            rect.setFillStyle(entering ? C_HOVER_P[this.currentPlayer] : highlight);
+          }
         }
       }
 
       onCellClick(rect) {
-        if (this.state === STATE.HOME) {
-          this.handleHomeClick(rect);
-        } else if (this.state === STATE.CLAIMING) {
-          this.handleClaimClick(rect);
-        }
+        if (this.locked) return;
+        if (this.state === STATE.HOME)          this.handleHomeClick(rect);
+        else if (this.state === STATE.CLAIMING) this.handleClaimClick(rect);
+        else if (this.state === STATE.CHANGING_HOME) this.handleNewHomeClick(rect);
       }
 
       // ── Home selection ───────────────────────────────────────────────────────
 
       handleHomeClick(rect) {
-        if (isForbiddenHome(rect.row, rect.col)) return;
-        if (rect.owner !== 0) return;
-
+        if (isForbiddenHome(rect.row, rect.col) || rect.owner !== 0) return;
         const p = this.currentPlayer;
         if (p === 1 && this.homesChosen !== 0) return;
         if (p === 2 && this.homesChosen !== 1) return;
 
-        this.claimRect(rect, p);
+        this.applyOwnership(rect, p);
+        this.placeHomeLabel(rect, p);
+        this.homeRects[p] = rect;
         this.homesChosen++;
 
         if (this.homesChosen === 1) {
           this.currentPlayer = 2;
           this.updateUI();
         } else {
-          // Both homes chosen — start gameplay with P1
           this.currentPlayer = 1;
-          this.state = STATE.COIN;
+          this.state = STATE.CLAIMING;
+          this.refreshTargets();
           this.updateUI();
         }
       }
 
-      // ── Coin flip ────────────────────────────────────────────────────────────
-
-      flipCoin() {
-        const heads = Math.random() < 0.5;
-        const p = this.currentPlayer;
-
-        if (heads) {
-          const claimable = this.getClaimableSquares(p);
-          if (claimable.length === 0) {
-            // Heads but nowhere to expand — skip
-            this.showCoinResult('HEADS — but no squares to claim! Turn skipped.', p);
-            this.time.delayedCall(1800, () => this.endTurn());
-          } else {
-            this.showCoinResult('HEADS — pick a square to claim!', p);
-            this.state = STATE.CLAIMING;
-            this.highlightClaimable(claimable);
-            this.coinBtn.setVisible(false);
-          }
-        } else {
-          this.showCoinResult('TAILS — turn ends.', p);
-          this.time.delayedCall(1500, () => this.endTurn());
-        }
-      }
-
-      showCoinResult(msg, p) {
-        this.statusText.setText(msg);
-        this.statusText.setColor(p === 1 ? '#4499ff' : '#ffaa33');
-        this.coinBtn.setVisible(false);
-      }
-
       // ── Claiming ─────────────────────────────────────────────────────────────
 
-      getClaimableSquares(p) {
+      getTargets(p) {
+        const opponent = p === 1 ? 2 : 1;
+        const oppHome = this.homeRects[opponent];
         const owned = this.cells.filter(c => c.owner === p);
-        const candidates = new Set();
+        const free = new Set(), opp = new Set(), home = new Set();
+
         for (const cell of owned) {
           for (let dr = -1; dr <= 1; dr++) {
             for (let dc = -1; dc <= 1; dc++) {
               if (dr === 0 && dc === 0) continue;
               const r = cell.row + dr, c = cell.col + dc;
               if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
-              const neighbour = this.grid[r][c];
-              if (neighbour.owner !== 0) continue;
+              const nb = this.grid[r][c];
               if (isRedSquare(r, c) || isGreenSquare(r, c)) continue;
-              candidates.add(neighbour);
+              if (nb.owner === 0)             free.add(nb);
+              else if (nb.owner === opponent) {
+                if (nb === oppHome) home.add(nb);
+                else                opp.add(nb);
+              }
             }
           }
         }
-        return [...candidates];
+        return { free: [...free], opp: [...opp], home: [...home] };
       }
 
-      highlightClaimable(claimable) {
-        for (const cell of claimable) {
-          cell.claimable = true;
-          cell.setFillStyle(C_CLAIMABLE);
+      refreshTargets() {
+        for (const cell of this.cells) cell.targetType = null;
+
+        const p = this.currentPlayer;
+        const { free, opp, home } = this.getTargets(p);
+        for (const cell of free) { cell.targetType = 'free'; cell.setStrokeStyle(3, C_TARGET_FREE); }
+        for (const cell of opp)  { cell.targetType = 'opp';  cell.setStrokeStyle(3, C_TARGET_OPP); }
+        for (const cell of home) { cell.targetType = 'home'; cell.setStrokeStyle(3, C_TARGET_HOME); }
+
+        // Allow home relocation only if there's at least one eligible destination (owned, not home, not black)
+        const hasEligibleDest = this.cells.some(c =>
+          c.owner === p && c !== this.homeRects[p] && !isForbiddenHome(c.row, c.col));
+        if (!this.firstTurn[p] && this.homeRects[p] && hasEligibleDest) {
+          const hr = this.homeRects[p];
+          hr.targetType = 'relocate';
+          hr.setFillStyle(C_RELOCATE);
         }
+
+        return free.length + opp.length + home.length;
       }
 
-      clearClaimableHighlights() {
+      clearTargets() {
         for (const cell of this.cells) {
-          if (cell.claimable) {
-            cell.claimable = false;
-            cell.setFillStyle(cell.owner === 0 ? cell.baseFill : (cell.owner === 1 ? C_P1 : C_P2));
+          if (cell.targetType) {
+            if (cell.targetType === 'free' || cell.targetType === 'opp' || cell.targetType === 'home') {
+              cell.setFillStyle(cell.baseFill);
+              cell.setStrokeStyle(2, C_BORDER);
+            } else {
+              if (cell.owner === 0) cell.setFillStyle(cell.baseFill);
+              else cell.setFillStyle(cell.owner === 1 ? C_P1 : C_P2);
+            }
+            cell.targetType = null;
           }
         }
       }
 
       handleClaimClick(rect) {
-        if (!rect.claimable) return;
-        this.clearClaimableHighlights();
-        this.claimRect(rect, this.currentPlayer);
-        this.endTurn();
+        if (!rect.targetType) return;
+
+        if (rect.targetType === 'relocate') {
+          this.enterHomeChange();
+          return;
+        }
+
+        const p = this.currentPlayer;
+        const opponent = p === 1 ? 2 : 1;
+        const pColor = p === 1 ? '#4499ff' : '#ffaa33';
+        const isOpponentSquare = rect.targetType === 'opp' || rect.targetType === 'home';
+        const odds = rect.targetType === 'free' ? ODDS_FREE
+                   : rect.targetType === 'opp'  ? ODDS_OPP
+                   :                              ODDS_HOME;
+        const success = Math.random() < odds;
+        const oddsLabel = rect.targetType === 'free' ? '2/3'
+                        : rect.targetType === 'opp'  ? '4/9'
+                        :                              '13%';
+
+        this.clearTargets();
+        this.locked = true;
+
+        if (success) {
+          const capturedHome = rect === this.homeRects[opponent];
+          this.applyOwnership(rect, p);
+
+          if (capturedHome) {
+            for (const cell of this.cells) {
+              if (cell.owner === opponent) this.applyOwnership(cell, p);
+            }
+            this.homeLabels[opponent]?.destroy();
+            delete this.homeLabels[opponent];
+            delete this.homeRects[opponent];
+
+            this.statusText.setText(`Player ${p} captured the home — PLAYER ${p} WINS!`).setColor(pColor);
+            this.restartBtn.setVisible(true);
+            return;
+          }
+
+          this.statusText.setText(`Player ${p} captured a square — another turn! (${oddsLabel})`).setColor(pColor);
+
+          if (isOpponentSquare) {
+            this.time.delayedCall(900, () => {
+              this.locked = false;
+              this.state = STATE.CLAIMING;
+              this.refreshTargets();
+              this.updateUI();
+            });
+            return;
+          }
+        } else {
+          this.statusText.setText(`Player ${p} failed to claim. (${oddsLabel})`).setColor('#aaaaaa');
+        }
+
+        this.time.delayedCall(1400, () => {
+          this.locked = false;
+          this.endTurn();
+        });
+      }
+
+// ── Home relocation ──────────────────────────────────────────────────────
+
+      enterHomeChange() {
+        const p = this.currentPlayer;
+        this.clearTargets();
+        this.state = STATE.CHANGING_HOME;
+
+        // Highlight all of the player's claimed squares except the current home
+        for (const cell of this.cells) {
+          if (cell.owner === p && cell !== this.homeRects[p] && !isForbiddenHome(cell.row, cell.col)) {
+            cell.targetType = 'newhome';
+            cell.setFillStyle(C_NEWHOME);
+          }
+        }
+
+        const pColor = p === 1 ? '#4499ff' : '#ffaa33';
+        this.statusText.setText(`Player ${p} — click a claimed square to move H`).setColor(pColor);
+      }
+
+      handleNewHomeClick(rect) {
+        if (rect.targetType !== 'newhome') return;
+
+        const p = this.currentPlayer;
+        this.clearTargets();
+
+        // Move the H label to the new square
+        this.homeLabels[p].setPosition(rect.x, rect.y);
+        this.homeRects[p] = rect;
+
+        const pColor = p === 1 ? '#4499ff' : '#ffaa33';
+        this.statusText.setText(`Player ${p} moved their home square.`).setColor(pColor);
+        this.locked = true;
+        this.time.delayedCall(1100, () => {
+          this.locked = false;
+          this.endTurn();
+        });
       }
 
       // ── Helpers ──────────────────────────────────────────────────────────────
 
-      claimRect(rect, player) {
+      applyOwnership(rect, player) {
         rect.owner = player;
-        rect.setFillStyle(player === 1 ? C_P1 : C_P2);
-        rect.baseFill = player === 1 ? C_P1 : C_P2;
+        const fill = player === 1 ? C_P1 : C_P2;
+        rect.setFillStyle(fill);
+        rect.baseFill = fill;
+      }
+
+      placeHomeLabel(rect, player) {
+        const label = this.add.text(rect.x, rect.y, 'H', {
+          fontSize: '28px', fontFamily: 'Arial Black, sans-serif',
+          color: '#ffffff', stroke: '#000000', strokeThickness: 4,
+        }).setOrigin(0.5, 0.5).setDepth(10);
+        this.homeLabels[player] = label;
       }
 
       endTurn() {
+        this.firstTurn[this.currentPlayer] = false;
         this.currentPlayer = this.currentPlayer === 1 ? 2 : 1;
-        this.state = STATE.COIN;
+        this.state = STATE.CLAIMING;
+        const count = this.refreshTargets();
+        if (count === 0) {
+          // No moves available — skip
+          const p = this.currentPlayer;
+          const pColor = p === 1 ? '#4499ff' : '#ffaa33';
+          this.statusText.setText(`Player ${p} has no moves — skipping.`).setColor(pColor);
+          this.locked = true;
+          this.time.delayedCall(1400, () => { this.locked = false; this.endTurn(); });
+          return;
+        }
         this.updateUI();
       }
 
@@ -273,16 +412,14 @@
         this.p2Label.setAlpha(p === 2 ? 1 : 0.35);
 
         if (this.state === STATE.HOME) {
-          this.coinBtn.setVisible(false);
           const msg = p === 1
             ? 'Player 1 — choose your home square'
             : 'Player 2 — choose your home square';
           this.statusText.setText(msg).setColor(pColor);
-        } else if (this.state === STATE.COIN) {
-          this.coinBtn.setVisible(true);
-          this.statusText.setText(`Player ${p}'s turn`).setColor(pColor);
+        } else if (this.state === STATE.CLAIMING) {
+          const hint = this.firstTurn[p] ? '' : '  (or click H to relocate)';
+          this.statusText.setText(`Player ${p} — pick a target${hint}`).setColor(pColor);
         }
-        // CLAIMING state: statusText already set by flipCoin()
       }
     }
 
