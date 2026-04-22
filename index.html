@@ -49,6 +49,16 @@
       return false;
     }
 
+    function isBlackSquare(row, col) {
+      return (row === 0 || row === ROWS - 1) && (col === CENTER_COL - 1 || col === CENTER_COL + 1);
+    }
+
+    // Returns the partner black square [row, col] for a given black square, or null.
+    function blackSquarePartner(row, col) {
+      if (!isBlackSquare(row, col)) return null;
+      return [row, col === CENTER_COL - 1 ? CENTER_COL + 1 : CENTER_COL - 1];
+    }
+
     class BoardScene extends Phaser.Scene {
       constructor() { super('BoardScene'); }
 
@@ -230,6 +240,19 @@
             }
           }
         }
+        // Black-square partner bonus: owning a black square makes its row-partner a valid target.
+        for (const cell of owned.filter(c => isBlackSquare(c.row, c.col))) {
+          const partner = blackSquarePartner(cell.row, cell.col);
+          if (!partner) continue;
+          const nb = this.grid[partner[0]][partner[1]];
+          if (nb.owner === p) continue; // already owned
+          if (nb.owner === 0)             free.add(nb);
+          else if (nb.owner === opponent) {
+            if (nb === oppHome) home.add(nb);
+            else                opp.add(nb);
+          }
+        }
+
         return { free: [...free], opp: [...opp], home: [...home] };
       }
 
